@@ -1,0 +1,12 @@
+<aspectj>
+
+    <aspects>
+        <aspect name="monitor.MonitorAspect"/>
+    </aspects>
+
+    <weaver options="-XnoInline">
+        <include within="monitor.*"/>
+        <include within="akka.actor.*"/>
+    </weaver>
+
+</aspectj>

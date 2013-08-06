@@ -57,11 +57,13 @@ import javax.management.NotCompliantMBeanException;
 public class MonitorAspect {
 
   @Pointcut(
-    value = "execution (* akka.actor.ActorCell.receiveMessage(..)) && args(msg)", 
+    value = "execution (* akka.actor.ActorCell.receiveMessage(..))" +
+            "&& args(msg)", 
     argNames = "msg")
   public void receiveMessagePointcut(Object msg) {}
 
-  @Before(value = "receiveMessagePointcut(msg)", argNames = "jp,msg")
+  @Before(value = "receiveMessagePointcut(msg)", 
+          argNames = "jp,msg")
   public void message(JoinPoint jp, Object msg) {
     // log the message
     System.out.println("Message " + msg);
@@ -138,7 +140,8 @@ public class MonitorAspect {
     private ActorSystemMessages asm = new ActorSystemMessages();
 
     @Pointcut(
-        value = "execution (* akka.actor.ActorCell.receiveMessage(..)) && args(msg)", 
+        value = "execution (* akka.actor.ActorCell.receiveMessage(..)) " +
+                "&& args(msg)", 
         argNames = "msg")
     public void receiveMessagePointcut(Object msg) {}
 
@@ -149,6 +152,129 @@ public class MonitorAspect {
     }
 }
 ```
+
+#Bringing in an actor
+Lets see it all run. We will make a simple actor; this time, we shall use the Actor DSL. We are not interested that much in its behaviour, but we want to see messages being sent around. So, we construct a simple ``App`` subclass with two actors. One that sends the messages around, the second one that prints any message it receives.
+
+```scala
+import akka.actor.{ActorRef, ActorSystem}
+
+object Main extends App {
+  import akka.actor.ActorDSL._
+  import Commands._
+
+  implicit val system = ActorSystem()
+
+  val chatter = actor(new Act {
+    become {
+      case i: Int =>
+        self ! (sender, i)
+      case (sender: ActorRef, i: Int) =>
+        if (i > 0)
+          self ! (sender, i - 1)
+        else
+          sender ! "zero"
+    }
+  })
+  implicit val _ = actor(new Act {
+    become {
+      case x => println(">>> " + x)
+    }
+  })
+
+  def commandLoop(): Unit = {
+    readLine() match {
+      case CountdownCommand(count) => chatter ! count.toInt
+
+      case QuitCommand             => return
+    }
+
+    commandLoop()
+  }
+
+  commandLoop()
+  system.shutdown()
+
+}
+
+object Commands {
+  val CountdownCommand = """(\d+)""".r
+  val QuitCommand      = "quit"
+}
+```
+
+The ``chatter`` actor, as you can see, receives the number of messages to be crunched. It then sends a message to itself as tuple containing the original sender and the number of messages, which will continue to decrease until we hit ``0``, when we send the ``"zero"`` ``String`` back to the original sender.
+
+As an interesting aside, we have the tail-recursive ``commandLoop()`` function, which deals with the input that the users type in.
+
+#Running the example
+If you run the example _without_ specifying ``-javaagent`` JVM parameter, the aspect will not be weaved in; consequently, no bytecode will be modified and our logging will not work. Because your IDEs are different, the only reliable way is to run it in SBT. And so, execute ``sbt run``, enter the number of messages and see them being displayed.
+
+Note that I'm setting the ``javaOptions``, ``fork`` and ``connectInput``. The ``javaOptions`` is obvious: that's how I specify the ``-javaagent`` parameter; ``fork`` makes SBT fork the ``java`` process so that the ``javaOptions`` takes effect. Finally, the ``connectInput`` parameter connects the ``System.in`` to the console's STDIN. (We must do this because we use ``readLine()`` in our app.)
+
+#JMX
+Now, I don't like ``println`` in the best of the times; and ``System.out.println`` is even worse. So, the last modification is to add JMX exporter; and to expose the ``ActorSystemPerformance`` MBean. The rather baroque JMX code is
+
+```java
+public interface ActorSystemPerformanceMXBean {
+
+    float getMessagesPerSecond();
+
+}
+
+public class ActorSystemPerformanceMXBeanImpl 
+    implements ActorSystemPerformanceMXBean{
+    private ActorSystemMessages messages;
+
+    ActorSystemPerformanceMXBeanImpl(ActorSystemMessages messages) {
+        this.messages = messages;
+    }
+
+    @Override
+    public float getMessagesPerSecond() {
+
+        return this.messages.average();
+    }
+
+}
+
+public class JMXEndpoint {
+    public static void start(ActorSystemMessages messages) throws ... {
+        MBeanServer mbs = ManagementFactory.getPlatformMBeanServer();
+        ObjectName name = new ObjectName("monitor:type=Performance");
+        ActorSystemPerformanceMXBeanImpl mbean = 
+          new ActorSystemPerformanceMXBeanImpl(messages);
+        mbs.registerMBean(mbean, name);
+    }
+}
+
+```
+
+With this in place, we can remove the ``System.out.println`` and call the ``JMXEndpoint.start)`` method in the aspect's constructor, giving us:
+
+```java
+@Aspect
+public class MonitorAspect {
+    final ActorSystemMessages messages;
+
+    public MonitorAspect() throws ... {
+        this.messages = new ActorSystemMessages();
+        JMXEndpoint.start(messages);
+    }
+
+    @Pointcut(...)
+    public void receiveMessagePointcut(Object msg) {}
+
+    @Before(...)
+    public void message(JoinPoint jp, Object msg) {
+        messages.recordMessage();
+    }
+}
+```
+
+Run the application using ``sbt run`` again, connect to the JMX MBean using ``jconsole`` and see the wonders!
+
+![jconsole](/jconsole.png)
 
 #Summary
 This article is a simple exploration of AOP (as implemented in AspectJ) and its use in Scala and Akka. The implementation is very simplistic; if you use it in production, I shall endorse you for _Enterprise PHP_ on LinkedIn. However, it is an interesting exercise and really shows how Scala fits well into even the sligtly more esoteric Java libraries. The source code for your compiling pleasure is at [https://github.com/eigengo/activator-akka-aspectj](https://github.com/eigengo/activator-akka-aspectj).

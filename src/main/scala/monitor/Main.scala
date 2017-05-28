@@ -37,7 +37,7 @@ object Main extends App {
   }
 
   commandLoop()
-  system.shutdown()
+  system.terminate()
 
 }
 
